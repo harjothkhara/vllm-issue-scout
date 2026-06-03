@@ -12,7 +12,12 @@ name: vLLM issue scout
 on:
   schedule:
     - cron: '17 * * * *'        # :17 past every hour (avoids the congested :00 slot)
-  workflow_dispatch: {}          # manual trigger
+  workflow_dispatch:             # manual trigger
+    inputs:
+      window_min:
+        description: 'look-back minutes (override WINDOW_MIN for testing)'
+        required: false
+        default: ''
 
 permissions:
   issues: write                  # read upstream (public) + open report issues here
@@ -34,6 +39,10 @@ jobs:
       - name: Scout fresh, unclaimed, CPU-verifiable issues
         run: |
           set -o pipefail
+
+          # Optional manual override of the look-back window (for test runs).
+          WIN="${{ github.event.inputs.window_min }}"
+          [ -n "$WIN" ] && WINDOW_MIN="$WIN"
 
           # Clearly-GPU/kernel/model terms => not CPU-verifiable on a Mac/container.
           EXCLUDE='CUDA|NCCL|FlashInfer|flashinfer|Triton|triton|cutlass|deepgemm|xformers|NVCC|cudagraph|fp8|fp4|nvfp4|Blackwell|Hopper|SM120|H100|H200|A100|B200|GPU|kernel|tensor.parallel|quantiz'
