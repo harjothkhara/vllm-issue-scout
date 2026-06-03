@@ -34,7 +34,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM: vllm-project/vllm
       REPORT_REPO: ${{ github.repository }}
-      WINDOW_MIN: "70"           # look-back window; >60 gives overlap, dedupe handles dupes
+      WINDOW_MIN: "240"          # look-back >> run cadence: GitHub cron drifts/skips
+                                 # (often ~2h apart), so a wide window + dedupe avoids
+                                 # missing issues in the gaps. Dedupe absorbs the overlap.
     steps:
       - name: Scout fresh, unclaimed, CPU-verifiable issues
         run: |
