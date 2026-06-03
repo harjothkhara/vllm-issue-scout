@@ -95,5 +95,7 @@ jobs:
           if [ "$found" -gt 0 ]; then
             gh issue create --repo "$REPORT_REPO" \
               --title "vLLM scout — $found fresh candidate(s) ($(date -u +%Y-%m-%d\ %H:%MZ))" \
-              --body "$body"
+              --assignee harjothkhara \
+              --body "@harjothkhara — $found fresh vLLM candidate(s):
+          $body"
           fi
