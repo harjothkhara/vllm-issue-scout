@@ -1,0 +1,90 @@
+name: vLLM issue scout
+
+# Polls vllm-project/vllm hourly for FRESH, unclaimed, CPU-verifiable issues with
+# the duplicate-work checklist already applied, and opens a report issue here when
+# it finds clean candidates — so we can pounce before the swarm.
+#
+# Why polling (not an `issues` event): Actions `issues` events only fire for the
+# repo the workflow lives in; a separate repo never receives vllm-project/vllm's
+# issue events, and scheduled workflows are disabled on forks. So we poll the
+# upstream API on a cron.
+
+on:
+  schedule:
+    - cron: '17 * * * *'        # :17 past every hour (avoids the congested :00 slot)
+  workflow_dispatch: {}          # manual trigger
+
+permissions:
+  issues: write                  # read upstream (public) + open report issues here
+  contents: read
+
+concurrency:
+  group: scout
+  cancel-in-progress: false
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: vllm-project/vllm
+      REPORT_REPO: ${{ github.repository }}
+      WINDOW_MIN: "70"           # look-back window; >60 gives overlap, dedupe handles dupes
+    steps:
+      - name: Scout fresh, unclaimed, CPU-verifiable issues
+        run: |
+          set -o pipefail
+
+          # Clearly-GPU/kernel/model terms => not CPU-verifiable on a Mac/container.
+          EXCLUDE='CUDA|NCCL|FlashInfer|flashinfer|Triton|triton|cutlass|deepgemm|xformers|NVCC|cudagraph|fp8|fp4|nvfp4|Blackwell|Hopper|SM120|H100|H200|A100|B200|GPU|kernel|tensor.parallel|quantiz'
+          cutoff=$(date -u -d "-${WINDOW_MIN} min" +%Y-%m-%dT%H:%M:%SZ)
+
+          # Scout-repo dedupe: bodies of already-filed report issues (state store).
+          seen=$(gh issue list --repo "$REPORT_REPO" --state all --limit 100 \
+                  --json body --jq '.[].body' 2>/dev/null || true)
+
+          body=""; found=0
+          while IFS=$'\t' read -r num title; do
+            [ -z "$num" ] && continue
+            # 1) cheap title exclude
+            echo "$title" | grep -qiE "$EXCLUDE" && continue
+            # 2) already reported in a prior run?
+            echo "$seen" | grep -qE "issues/${num}([^0-9]|$)" && continue
+            # 3) body check: strip the collect_env <details> dump first, then exclude
+            ibody=$(gh issue view "$num" --repo "$UPSTREAM" --json body --jq '.body' 2>/dev/null \
+                    | perl -0777 -pe 's/<details>.*?<\/details>//gs')
+            printf '%s\n%s\n' "$title" "$ibody" | grep -qiE "$EXCLUDE" && continue
+            # 4) dedup: PRs that cite the issue number
+            pr_num=$(gh pr list --repo "$UPSTREAM" --state open --search "$num in:body" \
+                      --json number --jq '[.[].number]|join(" ")')
+            [ -n "$pr_num" ] && continue
+            # 5) dedup: keyword/area PR search (existing fixes often don't cite the issue)
+            kw=$(echo "$title" | sed -E 's/\[[^]]*\]//g; s/[^a-zA-Z ]/ /g' \
+                 | tr 'A-Z' 'a-z' | tr ' ' '\n' \
+                 | grep -vE '^(the|and|with|when|from|that|this|bug|for|are|not|has|its|into|over|under|than)$' \
+                 | awk 'length>4' | head -2 | tr '\n' ' ')
+            pr_kw=$(gh pr list --repo "$UPSTREAM" --state open --search "$kw" \
+                     --json number,title --jq '[.[]|"#\(.number) \(.title)"]|join(" | ")')
+
+            found=$((found+1))
+            body="${body}
+          - **#${num}** ${title}
+            https://github.com/${UPSTREAM}/issues/${num}
+            keyword('${kw}') PRs: ${pr_kw:-none}
+            ACTION: confirm keyword/area dedupe + that root cause is in vllm-core, then pounce.
+          "
+          done < <(gh issue list --repo "$UPSTREAM" --state open --label bug --limit 50 \
+                    --json number,title,assignees,comments,createdAt \
+                    --jq ".[] | select(.createdAt > \"$cutoff\") | select((.assignees|length)==0) | select((.comments|length)<=2) | \"\(.number)\t\(.title)\"")
+
+          {
+            echo "## vLLM scout — $found fresh candidate(s)"
+            echo "window: issues created after $cutoff"
+            echo "$body"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$found" -gt 0 ]; then
+            gh issue create --repo "$REPORT_REPO" \
+              --title "vLLM scout — $found fresh candidate(s) ($(date -u +%Y-%m-%d\ %H:%MZ))" \
+              --body "$body"
+          fi
